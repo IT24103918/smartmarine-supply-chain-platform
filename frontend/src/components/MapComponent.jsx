@@ -3,28 +3,37 @@ import { StyleSheet, View, ActivityIndicator, Alert, Linking, TouchableOpacity, 
 import { WebView } from 'react-native-webview';
 import { Ionicons } from '@expo/vector-icons';
 
-const MapComponent = ({ address1, address2 }) => {
+const MapComponent = ({ address1, address2, coord1, coord2 }) => {
     const [loading, setLoading] = useState(true);
     const [coords, setCoords] = useState([]);
 
     useEffect(() => {
-        if (address1 || address2) {
+        if (address1 || address2 || coord1 || coord2) {
             geocodeAll();
         }
-    }, [address1, address2]);
+    }, [address1, address2, coord1, coord2]);
 
     const geocodeAll = async () => {
         setLoading(true);
         try {
             const newCoords = [];
-            if (address1) {
+            
+            // Handle first location
+            if (coord1 && coord1.lat && coord1.lon) {
+                newCoords.push({ ...coord1, title: 'Seller Location', color: 'red' });
+            } else if (address1) {
                 const pos = await getCoords(address1);
                 if (pos) newCoords.push({ ...pos, title: 'Location 1', color: 'red' });
             }
-            if (address2) {
+
+            // Handle second location
+            if (coord2 && coord2.lat && coord2.lon) {
+                newCoords.push({ ...coord2, title: 'Delivery Location', color: 'blue' });
+            } else if (address2) {
                 const pos = await getCoords(address2);
                 if (pos) newCoords.push({ ...pos, title: 'Location 2', color: 'blue' });
             }
+            
             setCoords(newCoords);
         } catch (error) {
             console.error("Geocoding error:", error);
@@ -36,7 +45,7 @@ const MapComponent = ({ address1, address2 }) => {
     const getCoords = async (address) => {
         try {
             const parts = address.split(',').map(p => p.trim());
-            
+
             // Try different combinations of the address for better accuracy
             const queries = [
                 address, // Full address
@@ -53,7 +62,7 @@ const MapComponent = ({ address1, address2 }) => {
                     headers: { 'User-Agent': 'SmartMarineApp/1.0' }
                 });
                 const data = await response.json();
-                
+
                 if (data && data.length > 0) {
                     return {
                         lat: parseFloat(data[0].lat),
@@ -139,20 +148,43 @@ const MapComponent = ({ address1, address2 }) => {
                         markers.push([c.lat, c.lon]);
                     });
 
-                    // Draw line if multiple points
+                    // ── Actual Road Routing (OSRM) ──
                     if (markers.length > 1) {
-                        var polyline = L.polyline(markers, {
-                            color: '#ff0000',
-                            weight: 4,
-                            opacity: 0.7,
-                            dashArray: '10, 10',
-                            lineJoin: 'round'
-                        }).addTo(map);
+                        var start = markers[0];
+                        var end = markers[1];
+                        var osrmUrl = 'https://router.project-osrm.org/route/v1/driving/' + 
+                                      start[1] + ',' + start[0] + ';' + end[1] + ',' + end[0] + 
+                                      '?overview=full&geometries=geojson';
+
+                        fetch(osrmUrl)
+                            .then(response => response.json())
+                            .then(data => {
+                                if (data.routes && data.routes.length > 0) {
+                                    var route = data.routes[0].geometry;
+                                    var polyline = L.geoJSON(route, {
+                                        style: {
+                                            color: '#ff0000', // Red route line
+                                            weight: 7,
+                                            opacity: 0.8,
+                                            lineJoin: 'round'
+                                        }
+                                    }).addTo(map);
+                                    
+                                    // Adjust bounds to fit the actual route
+                                    map.fitBounds(polyline.getBounds(), { padding: [40, 40] });
+                                } else {
+                                    // Fallback to straight line if OSRM fails
+                                    L.polyline(markers, { color: '#ff0000', weight: 5, dashArray: '10, 10' }).addTo(map);
+                                }
+                            })
+                            .catch(err => {
+                                L.polyline(markers, { color: '#ff0000', weight: 5, dashArray: '10, 10' }).addTo(map);
+                            });
                     }
                     
-                    var bounds = new L.LatLngBounds(markers);
-                    map.fitBounds(bounds, { padding: [50, 50] });
-                    if (coords.length === 1) map.setZoom(15);
+                    if (coords.length === 1) {
+                        map.setView([coords[0].lat, coords[0].lon], 15);
+                    }
                 }
 
             </script>
@@ -182,7 +214,7 @@ const MapComponent = ({ address1, address2 }) => {
             />
 
 
-            
+
             {coords.length > 0 && !loading && (
                 <TouchableOpacity style={styles.openMapsBtn} onPress={handleOpenExternalMaps}>
                     <Ionicons name="location-sharp" size={18} color="#fff" />

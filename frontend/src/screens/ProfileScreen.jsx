@@ -1,15 +1,16 @@
 import React, { useState, useEffect } from 'react';
-import { 
-    View, 
-    Text, 
-    StyleSheet, 
-    ScrollView, 
-    TouchableOpacity, 
-    Image, 
-    TextInput, 
+import {
+    View,
+    Text,
+    StyleSheet,
+    ScrollView,
+    TouchableOpacity,
+    Image,
+    TextInput,
     Alert,
     Dimensions,
-    ActivityIndicator
+    ActivityIndicator,
+    Share
 } from 'react-native';
 
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -21,6 +22,7 @@ import * as ImagePicker from 'expo-image-picker';
 import { uploadToServer } from '../api/uploadService';
 import MapComponent from '../components/MapComponent';
 import ImageUploadButton from '../components/ImageUploadButton';
+import * as Location from 'expo-location';
 
 
 const { width } = Dimensions.get('window');
@@ -70,7 +72,7 @@ const ProfileScreen = ({ navigation }) => {
         try {
             const response = await client.get('/api/trips/my-trips');
             setMyTrips(response.data);
-            
+
             // Also fetch earnings for summary
             const payoutRes = await client.get('/api/trips/payouts');
             const total = payoutRes.data.reduce((acc, curr) => acc + curr.amount, 0);
@@ -87,7 +89,7 @@ const ProfileScreen = ({ navigation }) => {
             setUser(updatedUser);
             setImage(url);
             await AsyncStorage.setItem('userData', JSON.stringify(updatedUser));
-            
+
             // Sync with server
             await client.put('/api/users/profile', { profileImage: url });
             Alert.alert("Success", "Profile photo updated!");
@@ -127,6 +129,35 @@ const ProfileScreen = ({ navigation }) => {
         }
     };
 
+    const handleUpdateLocation = async () => {
+        try {
+            setLoading(true);
+            let { status } = await Location.requestForegroundPermissionsAsync();
+            if (status !== 'granted') {
+                Alert.alert('Permission Denied', 'Permission to access location was denied');
+                return;
+            }
+
+            let location = await Location.getCurrentPositionAsync({});
+            const { latitude, longitude } = location.coords;
+
+            const response = await client.put('/api/users/profile', {
+                latitude,
+                longitude
+            });
+
+            const updatedUser = response.data;
+            setUser(updatedUser);
+            await AsyncStorage.setItem('userData', JSON.stringify(updatedUser));
+            Alert.alert("Location Updated 📍", "Your precise mapping location has been saved.");
+        } catch (error) {
+            console.error("Location update error:", error);
+            Alert.alert("Error", "Could not get your location. Please check your GPS settings.");
+        } finally {
+            setLoading(false);
+        }
+    };
+
     const handleUpdate = async () => {
         try {
             setLoading(true);
@@ -140,7 +171,7 @@ const ProfileScreen = ({ navigation }) => {
             const updatedUser = response.data;
             setUser(updatedUser);
             await AsyncStorage.setItem('userData', JSON.stringify(updatedUser));
-            
+
             Alert.alert("Success", "Profile updated successfully!");
             setIsEditing(false);
         } catch (error) {
@@ -148,6 +179,14 @@ const ProfileScreen = ({ navigation }) => {
             Alert.alert("Error", error.response?.data?.message || "Failed to update profile");
         } finally {
             setLoading(false);
+        }
+    };
+
+    const copyUserId = async () => {
+        if (user?._id) {
+            await Share.share({
+                message: user._id,
+            });
         }
     };
 
@@ -176,7 +215,7 @@ const ProfileScreen = ({ navigation }) => {
                                 <Ionicons name={isEditing ? "close" : "create-outline"} size={28} color="#fff" />
                             </TouchableOpacity>
                         </View>
-                        
+
                         <View style={styles.profileImageContainer}>
                             <TouchableOpacity onPress={isEditing ? pickImage : null} disabled={!isEditing}>
                                 <View style={styles.imageWrapper}>
@@ -196,9 +235,9 @@ const ProfileScreen = ({ navigation }) => {
                             </TouchableOpacity>
                             <Text style={styles.userName}>{user?.name || "User Name"}</Text>
                             <Text style={styles.userRole}>{user?.role?.replace('_', ' ') || "Role"} • {user?.district || "Location"}</Text>
-                            
+
                             {user?.role === 'trip_planner' && (
-                                <TouchableOpacity 
+                                <TouchableOpacity
                                     style={styles.planTripBtn}
                                     onPress={() => navigation.navigate('CreateTrip')}
                                 >
@@ -223,11 +262,11 @@ const ProfileScreen = ({ navigation }) => {
                         </View>
                     )}
 
-                    
+
                     <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.tripsScroll}>
                         {myTrips.map((trip) => (
-                            <TouchableOpacity 
-                                key={trip._id} 
+                            <TouchableOpacity
+                                key={trip._id}
                                 style={styles.tripMiniCard}
                                 onPress={() => navigation.navigate('ManageTrip', { tripId: trip._id })}
                             >
@@ -247,7 +286,7 @@ const ProfileScreen = ({ navigation }) => {
                     </ScrollView>
 
                     {/* Earnings Summary Card */}
-                    <TouchableOpacity 
+                    <TouchableOpacity
                         style={styles.earningsSummaryCard}
                         onPress={() => navigation.navigate('Earnings')}
                     >
@@ -271,8 +310,14 @@ const ProfileScreen = ({ navigation }) => {
 
                     {/* Info Card */}
                     <View style={styles.card}>
-                        <Text style={styles.cardTitle}>Personal Information</Text>
-                        
+                        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
+                            <Text style={styles.cardTitle}>Personal Information</Text>
+                            <TouchableOpacity style={styles.idBadge} onPress={copyUserId}>
+                                <Text style={styles.idText}>ID: {user?._id?.slice(-6).toUpperCase()}</Text>
+                                <Ionicons name="copy-outline" size={14} color="#64748b" />
+                            </TouchableOpacity>
+                        </View>
+
                         <View style={styles.infoRow}>
                             <View style={styles.iconBox}>
                                 <Ionicons name="person-outline" size={22} color="#2563eb" />
@@ -318,16 +363,30 @@ const ProfileScreen = ({ navigation }) => {
 
                     {/* Location Map */}
                     <View style={styles.mapCard}>
-                        <Text style={styles.cardTitle}>Your Location</Text>
-                        {address ? (
-                            <MapComponent address1={address} />
+                        <View style={styles.sectionHeader}>
+                            <Text style={styles.cardTitle}>Your Location</Text>
+                            <TouchableOpacity
+                                style={styles.pinLocationBtn}
+                                onPress={handleUpdateLocation}
+                                disabled={loading}
+                            >
+                                <Ionicons name="locate" size={18} color="#2563eb" />
+                                <Text style={styles.pinLocationText}>Pin Precise GPS</Text>
+                            </TouchableOpacity>
+                        </View>
+
+                        {(user?.latitude || address) ? (
+                            <MapComponent
+                                address1={!user?.latitude ? address : null}
+                                coord1={user?.latitude ? { lat: user.latitude, lon: user.longitude } : null}
+                            />
                         ) : (
                             <View style={styles.noAddressContainer}>
                                 <Ionicons name="map-outline" size={40} color="#94a3b8" />
                                 <Text style={styles.noAddressText}>Update your address to see it on map</Text>
                             </View>
                         )}
-                        <Text style={styles.mapHint}>Map generated using OpenStreetMap (Free)</Text>
+                        <Text style={styles.mapHint}>GPS Pinning ensures customers see the correct delivery path.</Text>
                     </View>
 
 
@@ -515,7 +574,20 @@ const styles = StyleSheet.create({
         fontSize: 18,
         fontWeight: '800',
         color: '#1e293b',
-        marginBottom: 20,
+    },
+    idBadge: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        backgroundColor: '#f1f5f9',
+        paddingHorizontal: 10,
+        paddingVertical: 5,
+        borderRadius: 10,
+        gap: 5,
+    },
+    idText: {
+        fontSize: 10,
+        fontWeight: '800',
+        color: '#64748b',
     },
     mapCard: {
         backgroundColor: '#fff',
@@ -599,6 +671,22 @@ const styles = StyleSheet.create({
         color: '#ef4444',
         fontSize: 16,
         fontWeight: '700',
+    },
+    pinLocationBtn: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        backgroundColor: '#eff6ff',
+        paddingHorizontal: 12,
+        paddingVertical: 6,
+        borderRadius: 10,
+        gap: 6,
+        borderWidth: 1,
+        borderColor: '#bfdbfe',
+    },
+    pinLocationText: {
+        fontSize: 12,
+        fontWeight: '700',
+        color: '#2563eb',
     },
     noAddressContainer: {
         height: 200,

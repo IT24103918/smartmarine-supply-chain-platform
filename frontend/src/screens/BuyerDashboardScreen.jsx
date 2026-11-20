@@ -29,15 +29,65 @@ const BuyerDashboardScreen = ({ navigation }) => {
     const [loading, setLoading] = useState(true);
     const [availableCatches, setAvailableCatches] = useState([]);
     const [filteredCatches, setFilteredCatches] = useState([]);
+    const [filteredOngoingTrips, setFilteredOngoingTrips] = useState([]);
     const [selectedType, setSelectedType] = useState('All');
     const [expandedMapId, setExpandedMapId] = useState(null);
     const [user, setUser] = useState(null);
     const [marketRates, setMarketRates] = useState([]);
     const [rateModalVisible, setRateModalVisible] = useState(false);
-    const [editingRate, setEditingRate] = useState(null);
+    const [editingRate, setEditingRate] = useState(null);   // which fish type card is expanded
+    const [draftPrices, setDraftPrices] = useState({});    // live edits before save
+    const [savingRate, setSavingRate] = useState(false);
     const [myStock, setMyStock] = useState([]);
     const [ongoingTrips, setOngoingTrips] = useState([]);
     const [refreshing, setRefreshing] = useState(false);
+    const [buyingPrices, setBuyingPrices] = useState([]); // latest pricePerKg from TripFishPrice
+    const [inventory, setInventory] = useState({});    // Aggregated stock by fish type
+    const [selectedInventoryType, setSelectedInventoryType] = useState(null);
+    const [inventoryModalVisible, setInventoryModalVisible] = useState(false);
+
+    // ── Market Rate Helpers ────────────────────────────────────
+    const fetchBuyingPrices = async () => {
+        try {
+            const res = await client.get('/api/fish-prices/latest/by-fish-type');
+            setBuyingPrices(Array.isArray(res.data) ? res.data : []);
+        } catch (e) {
+            console.warn('Could not load buying prices:', e.message);
+        }
+    };
+
+    const openRateModal = () => {
+        fetchBuyingPrices();   // always refresh when opening
+        fetchMarketRates();
+        setRateModalVisible(true);
+    };
+
+    const openEditRate = (rate) => {
+        setEditingRate(rate.fishType);
+        setDraftPrices({
+            retailPriceA: String(rate.retailPriceA || ''),
+            retailPriceB: String(rate.retailPriceB || ''),
+        });
+    };
+
+    const handleUpdateRate = async (fishType) => {
+        setSavingRate(true);
+        try {
+            await client.post('/api/buyer-prices', {
+                fishType,
+                retailPriceA: parseFloat(draftPrices.retailPriceA) || 0,
+                retailPriceB: parseFloat(draftPrices.retailPriceB) || 0,
+            });
+            await fetchMarketRates();
+            setEditingRate(null);
+            Alert.alert('Saved ✅', `Retail prices updated for ${fishType}`);
+        } catch (e) {
+            Alert.alert('Error', 'Failed to update price');
+        } finally {
+            setSavingRate(false);
+        }
+    };
+
 
 
     const fishTypes = ['All', 'Tuna (කෙලවල්ලා)', 'Skipjack (බලයා)', 'Marlin (කොප්පරා)', 'Mullet (මෝරා)'];
@@ -80,48 +130,96 @@ const BuyerDashboardScreen = ({ navigation }) => {
 
     const fetchMarketRates = async () => {
         try {
-            const response = await client.get('/api/market-rates');
-            setMarketRates(response.data);
+            // 1. Fetch Global Defaults
+            const globalRes = await client.get('/api/market-rates');
+            const globals = globalRes.data;
+
+            // 2. Fetch My Specific Prices
+            const buyerRes = await client.get('/api/buyer-prices/my');
+            const myPrices = buyerRes.data;
+
+            // Merge: Start with globals, override with myPrices
+            const merged = globals.map(g => {
+                const my = myPrices.find(p => p.fishType === g.fishType);
+                return {
+                    ...g,
+                    retailPriceA: my ? my.retailPriceA : g.retailPriceA,
+                    retailPriceB: my ? my.retailPriceB : g.retailPriceB,
+                };
+            });
+
+            setMarketRates(merged);
         } catch (error) {
             console.error("Fetch rates error:", error);
         }
     };
 
     useEffect(() => {
+        if (selectedType === 'All') {
+            setFilteredCatches(availableCatches);
+            setFilteredOngoingTrips(ongoingTrips);
+        } else {
+            // Filter Available Catches
+            const filteredA = availableCatches.filter(trip =>
+                trip.catchSummary?.catchBreakdown?.[selectedType] ||
+                trip.catches?.some(c => c.fishType === selectedType)
+            );
+            setFilteredCatches(filteredA);
+
+            // Filter Ongoing Trips
+            const filteredO = ongoingTrips.filter(trip =>
+                trip.catches?.some(c => c.fishType === selectedType)
+            );
+            setFilteredOngoingTrips(filteredO);
+        }
+    }, [selectedType, availableCatches, ongoingTrips]);
+
+    useEffect(() => {
         fetchMarketRates();
+        fetchMyInventory();
     }, []);
+
+    const fetchMyInventory = async () => {
+        try {
+            const res = await client.get('/api/inventory/my');
+            const data = Array.isArray(res.data) ? res.data : [];
+
+            const inv = {};
+            data.forEach(item => {
+                const type = item.fishType;
+                if (!inv[type]) {
+                    inv[type] = { total: 0, gradeA: 0, gradeB: 0, items: [] };
+                }
+                inv[type].total += item.weight;
+                if (item.grade === 'Grade A') inv[type].gradeA += item.weight;
+                if (item.grade === 'Grade B') inv[type].gradeB += item.weight;
+
+                inv[type].items.push({
+                    _id: item._id,
+                    vesselName: item.tripId?.vesselId?.name || "Market",
+                    weight: item.weight,
+                    date: new Date(item.createdAt).toLocaleDateString(),
+                    grade: item.grade
+                });
+            });
+            setInventory(inv);
+        } catch (e) {
+            console.error("Fetch my inventory error:", e);
+        }
+    };
 
     const fetchAvailableCatches = async (district) => {
         try {
             const response = await client.get(`/api/trips/market/all?district=${district}`);
             const data = Array.isArray(response.data) ? response.data : [];
-            
-            // Available: Completed but NOT yet sold (Backend already filtered by district)
+
             const available = data.filter(t => t.status === 'completed');
-            
-            // My Stock: Sold to ME (logged in user)
-            const bought = data.filter(t => t.status === 'sold' && t.buyerId?._id === user?._id);
+            setAvailableCatches(available);
+            setFilteredCatches(available);
 
-            const [availableWithSummary, boughtWithSummary] = await Promise.all([
-                Promise.all(available.map(async (trip) => {
-                    try {
-                        const summaryRes = await client.get(`/api/trips/${trip._id}/summary`);
-                        return { ...trip, summary: summaryRes.data };
-                    } catch (e) { return { ...trip }; }
-                })),
-                Promise.all(bought.map(async (trip) => {
-                    try {
-                        const summaryRes = await client.get(`/api/trips/${trip._id}/summary`);
-                        return { ...trip, summary: summaryRes.data };
-                    } catch (e) { return { ...trip }; }
-                }))
-            ]);
-
-            setAvailableCatches(availableWithSummary);
-            setFilteredCatches(availableWithSummary);
-            setMyStock(boughtWithSummary);
+            fetchMyInventory();
         } catch (error) {
-            console.error("Fetch catches error:", error);
+            console.error('Fetch catches error:', error);
         } finally {
             setLoading(false);
         }
@@ -132,56 +230,52 @@ const BuyerDashboardScreen = ({ navigation }) => {
         if (selectedType === 'All') {
             setFilteredCatches(availableCatches);
         } else {
+            // Filter using catchSummary.catchBreakdown from the enriched response
             const filtered = availableCatches.filter(trip =>
-                trip.summary && trip.summary.catchBreakdown && trip.summary.catchBreakdown[selectedType]
+                trip.catchSummary?.catchBreakdown?.[selectedType]
             );
             setFilteredCatches(filtered);
         }
     }, [selectedType, availableCatches]);
 
 
+    // Uses TripFishPrice (fishPrices) embedded by backend — pricePerKg × sellable weight
     const calculateTotalPrice = (item) => {
-        const summary = item.summary;
-        if (!summary || !summary.catchBreakdownDetails) return 0;
+        // Use the pre-computed estimatedValue from the backend if available
+        if (item.estimatedValue && item.estimatedValue > 0) return item.estimatedValue;
+
+        // Fallback: compute locally using fishPrices + catchSummary
+        const detailsMap = item.catchSummary?.catchBreakdownDetails || {};
+        const prices = item.fishPrices || [];
+        if (prices.length === 0 || Object.keys(detailsMap).length === 0) return 0;
 
         let total = 0;
-
-        // If the Planner has set custom prices for this trip
-        if (item.customPrices && item.customPrices.length > 0) {
-            item.customPrices.forEach(cp => {
-                const details = summary.catchBreakdownDetails[cp.fishType];
-                if (details) {
-                    total += (details.gradeA || 0) * (cp.priceA || 0);
-                    total += (details.gradeB || 0) * (cp.priceB || 0);
-                }
-            });
-        } else {
-            // Fallback to market rates if no custom prices
-            Object.keys(summary.catchBreakdownDetails).forEach(fishType => {
-                const details = summary.catchBreakdownDetails[fishType];
-                const rate = marketRates.find(r => r.fishType === fishType) || marketRates[0];
-                
-                total += (details.gradeA || 0) * (rate?.gradeAPrice || 1500);
-                total += (details.gradeB || 0) * (rate?.gradeBPrice || 1000);
-            });
-        }
-
+        prices.forEach(p => {
+            const d = detailsMap[p.fishType];
+            if (d) total += ((d.gradeA || 0) + (d.gradeB || 0)) * (p.pricePerKg || 0);
+        });
         return total;
     };
 
     const handleBuy = async (tripId, totalPrice) => {
         try {
             setLoading(true);
-            const response = await client.post(`/api/trips/${tripId}/buy`, { totalPrice });
+            await client.post(`/api/trips/${tripId}/buy`, { totalPrice });
+
+            // ── Immediately remove from list so it disappears without waiting for OK ──
+            setAvailableCatches(prev => prev.filter(t => t._id !== tripId));
+            setFilteredCatches(prev => prev.filter(t => t._id !== tripId));
+
             Alert.alert(
-                "Payment Successful!", 
-                "The transaction is complete. The earnings have been distributed to the Vessel Owner, Trip Planner, and Crew members.",
+                "Payment Successful! 🎉",
+                "The transaction is complete. Earnings have been distributed to the Vessel Owner, Trip Planner, and Crew.",
                 [{ text: "OK", onPress: () => loadUserAndCatches() }]
             );
         } catch (error) {
-            setLoading(false);
             console.error(error);
             Alert.alert("Error", error.response?.data?.message || "Payment failed");
+        } finally {
+            setLoading(false);
         }
     };
 
@@ -205,43 +299,83 @@ const BuyerDashboardScreen = ({ navigation }) => {
     const renderCatchCard = ({ item }) => {
         if (!item || !item._id) return null;
 
-        const vesselName = item.vesselId?.name || "Unknown Vessel";
-        const district = item.plannerId?.district || "Unknown";
+        const vesselName = item.vesselId?.name || 'Unknown Vessel';
+        const district = item.plannerId?.district || 'Unknown';
+        const summary = item.catchSummary || {};
+        const fishPrices = item.fishPrices || [];
+        const breakdown = summary.catchBreakdown || {};
+        const totalValue = calculateTotalPrice(item);
+        const hasPhoots = item.catches?.some(c => c.photos?.length > 0);
 
         return (
             <View style={styles.catchCard}>
 
+                {/* ── Header ── */}
                 <View style={styles.cardHeader}>
                     <View>
                         <Text style={styles.vesselName}>{vesselName}</Text>
-                        <Text style={styles.harborName}>{district} Harbor</Text>
+                        <Text style={styles.harborName}>
+                            <Ionicons name="location-outline" size={12} color="#64748b" /> {district} Harbor
+                        </Text>
                     </View>
-
                     <View style={styles.freshBadge}>
                         <Text style={styles.freshText}>FRESH ARRIVAL</Text>
                     </View>
                 </View>
 
+                {/* ── Grade totals ── */}
                 <View style={styles.statsRow}>
                     <View style={styles.statItem}>
-                        <Text style={styles.statLabel}>Grade A (Premium)</Text>
-                        <Text style={[styles.statValue, { color: '#22c55e' }]}>
-                            {(item.summary?.supermarketStock || 0).toFixed(1)} kg
+                        <Text style={styles.statLabel}>Total Weight</Text>
+                        <Text style={[styles.statValue, { color: '#1e293b' }]}>
+                            {(summary.totalWeight || 0).toFixed(1)} kg
                         </Text>
                     </View>
                     <View style={styles.divider} />
                     <View style={styles.statItem}>
-                        <Text style={styles.statLabel}>Grade B (Standard)</Text>
+                        <Text style={styles.statLabel}>Grade A 🟢</Text>
+                        <Text style={[styles.statValue, { color: '#22c55e' }]}>
+                            {(summary.gradeAWeight || 0).toFixed(1)} kg
+                        </Text>
+                    </View>
+                    <View style={styles.divider} />
+                    <View style={styles.statItem}>
+                        <Text style={styles.statLabel}>Grade B 🔵</Text>
                         <Text style={[styles.statValue, { color: '#3b82f6' }]}>
-                            {(item.summary?.customerStock || 0).toFixed(1)} kg
+                            {(summary.gradeBWeight || 0).toFixed(1)} kg
                         </Text>
                     </View>
                 </View>
 
-                {/* Catch Photos Section */}
-                {item.catches && item.catches.some(c => c.photos && c.photos.length > 0) && (
+                {/* ── Per fish-type price breakdown ── */}
+                {fishPrices.length > 0 && (
+                    <View style={styles.priceBreakdownBox}>
+                        <Text style={styles.priceBreakdownTitle}>🏷️ Planner Selling Prices</Text>
+                        {fishPrices.map((p, i) => {
+                            const details = (summary.catchBreakdownDetails && summary.catchBreakdownDetails[p.fishType]) || {};
+                            const sellKg = (details.gradeA || 0) + (details.gradeB || 0);
+                            const lineVal = sellKg * (p.pricePerKg || 0);
+                            return (
+                                <View key={i} style={styles.priceBreakdownRow}>
+                                    <View style={{ flex: 1 }}>
+                                        <Text style={styles.priceBreakdownFish}>{p.fishType}</Text>
+                                        <Text style={styles.priceBreakdownSub}>
+                                            {sellKg.toFixed(1)} kg × LKR {Math.round(p.pricePerKg).toLocaleString()}/kg
+                                        </Text>
+                                    </View>
+                                    <Text style={styles.priceBreakdownVal}>
+                                        LKR {Math.round(lineVal).toLocaleString()}
+                                    </Text>
+                                </View>
+                            );
+                        })}
+                    </View>
+                )}
+
+                {/* ── Catch photos ── */}
+                {hasPhoots && (
                     <View style={styles.photoSection}>
-                        <Text style={styles.photoLabel}>Catch Photos (Fisherman Update):</Text>
+                        <Text style={styles.photoLabel}>📸 Catch Photos:</Text>
                         <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.photoScroll}>
                             {item.catches.flatMap(c => c.photos || []).map((photo, idx) => (
                                 <Image key={idx} source={{ uri: photo }} style={styles.catchImage} />
@@ -250,19 +384,24 @@ const BuyerDashboardScreen = ({ navigation }) => {
                     </View>
                 )}
 
+                {/* ── Total value ── */}
                 <View style={styles.priceSection}>
-                    <Text style={styles.priceLabel}>Estimated Total Catch Value:</Text>
-                    <Text style={styles.priceValue}>LKR {calculateTotalPrice(item).toLocaleString()}</Text>
+                    <Text style={styles.priceLabel}>
+                        {fishPrices.length > 0 ? 'Total Catch Value (Planner Prices)' : 'Estimated Catch Value'}
+                    </Text>
+                    <Text style={styles.priceValue}>LKR {Math.round(totalValue).toLocaleString()}</Text>
                 </View>
 
+                {/* ── Actions ── */}
                 <View style={styles.actionButtons}>
-
                     <TouchableOpacity
                         style={[styles.actionBtn, styles.locationBtn]}
                         onPress={() => setExpandedMapId(expandedMapId === item._id ? null : item._id)}
                     >
-                        <Ionicons name={expandedMapId === item._id ? "close" : "location-outline"} size={20} color="#2563eb" />
-                        <Text style={styles.locationBtnText}>{expandedMapId === item._id ? "Hide Map" : "View Logistics"}</Text>
+                        <Ionicons name={expandedMapId === item._id ? 'close' : 'location-outline'} size={20} color="#2563eb" />
+                        <Text style={styles.locationBtnText}>
+                            {expandedMapId === item._id ? 'Hide Map' : 'Logistics'}
+                        </Text>
                     </TouchableOpacity>
 
                     {item.status !== 'sold' && (
@@ -270,7 +409,7 @@ const BuyerDashboardScreen = ({ navigation }) => {
                             style={[styles.actionBtn, styles.buyBtn]}
                             onPress={() => handlePurchaseRequest(item)}
                         >
-                            <Text style={styles.buyBtnText}>Pay Now</Text>
+                            <Text style={styles.buyBtnText}>Buy Now</Text>
                             <Ionicons name="card-outline" size={20} color="#fff" />
                         </TouchableOpacity>
                     )}
@@ -278,12 +417,12 @@ const BuyerDashboardScreen = ({ navigation }) => {
 
                 {expandedMapId === item._id && (
                     <View style={styles.mapContainer}>
-                        <MapComponent 
-                            address1={item.plannerId?.address || `${item.plannerId?.district || 'Galle'} Harbor`} 
+                        <MapComponent
+                            address1={item.plannerId?.address || `${district} Harbor`}
                             address2={item.status === 'sold' ? user?.address : null}
                         />
                         {item.status === 'sold' && (
-                            <Text style={styles.routeNote}>Dashed line shows the route to your location</Text>
+                            <Text style={styles.routeNote}>Dashed line shows route to your location</Text>
                         )}
                     </View>
                 )}
@@ -295,7 +434,6 @@ const BuyerDashboardScreen = ({ navigation }) => {
 
     return (
         <View style={{ flex: 1, backgroundColor: '#f8fafc' }}>
-
             <LinearGradient colors={['#0f172a', '#1e3a8a']} style={styles.header}>
                 <SafeAreaView>
                     <View style={styles.headerContent}>
@@ -304,38 +442,27 @@ const BuyerDashboardScreen = ({ navigation }) => {
                             <Text style={styles.subText}>Available stock in {user?.district || 'Galle'}</Text>
                         </View>
 
-                        <View style={{ flexDirection: 'row', gap: 15 }}>
+                        <View style={{ flexDirection: 'row', gap: 12, alignItems: 'center' }}>
+                            <TouchableOpacity
+                                onPress={openRateModal}
+                                style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(255,255,255,0.15)', paddingHorizontal: 10, paddingVertical: 5, borderRadius: 10, gap: 5 }}
+                            >
+                                <Ionicons name="pricetags-outline" size={18} color="#fff" />
+                                <Text style={{ color: '#fff', fontSize: 12, fontWeight: '700' }}>Prices</Text>
+                            </TouchableOpacity>
                             <TouchableOpacity onPress={() => navigation.navigate('OrderManagement')}>
-                                <Ionicons name="receipt-outline" size={28} color="#fff" />
+                                <Ionicons name="receipt-outline" size={26} color="#fff" />
                             </TouchableOpacity>
                             <TouchableOpacity onPress={() => navigation.navigate('Profile')}>
-                                <Ionicons name="person-circle-outline" size={32} color="#fff" />
+                                <Ionicons name="person-circle-outline" size={30} color="#fff" />
                             </TouchableOpacity>
                         </View>
-                    </View>
-                    
-                    <View style={styles.headerActions}>
-                        <TouchableOpacity 
-                            style={styles.manageRatesBtn} 
-                            onPress={() => setRateModalVisible(true)}
-                        >
-                            <Ionicons name="settings-outline" size={18} color="#fff" />
-                            <Text style={styles.manageRatesText}>Market Prices</Text>
-                        </TouchableOpacity>
-
-                        <TouchableOpacity 
-                            style={[styles.manageRatesBtn, { backgroundColor: '#10b981' }]} 
-                            onPress={() => navigation.navigate('OrderManagement')}
-                        >
-                            <Ionicons name="basket-outline" size={18} color="#fff" />
-                            <Text style={styles.manageRatesText}>View Orders</Text>
-                        </TouchableOpacity>
                     </View>
                 </SafeAreaView>
             </LinearGradient>
 
             <View style={styles.filterSection}>
-                <Text style={styles.filterTitle}>Filter by Category</Text>
+                <Text style={styles.filterTitle}>Filter by Species (වර්ගය අනුව පෙරන්න)</Text>
                 <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.filterScroll}>
                     {fishTypes.map((type) => (
                         <TouchableOpacity
@@ -364,26 +491,53 @@ const BuyerDashboardScreen = ({ navigation }) => {
                     showsVerticalScrollIndicator={false}
                     ListHeaderComponent={
                         <View>
-                            {myStock.length > 0 && (
+                            {Object.keys(inventory).length > 0 && (
                                 <View style={styles.myStockSection}>
-                                    <Text style={styles.sectionTitle}>My Bought Stock (මගේ තොග)</Text>
+                                    <Text style={styles.sectionTitle}>My Inventory Inventory (මගේ තොග)</Text>
                                     <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.stockScroll}>
-                                        {myStock.map((trip) => (
-                                            <TouchableOpacity 
-                                                key={trip._id} 
-                                                style={styles.stockMiniCard}
-                                                onPress={() => navigation.navigate('TripSummary', { tripId: trip._id })}
+                                        {Object.entries(inventory).map(([type, data]) => (
+                                            <TouchableOpacity
+                                                key={type}
+                                                style={styles.inventoryCard}
+                                                onPress={() => {
+                                                    const rate = marketRates.find(r => r.fishType === type);
+                                                    if (rate) {
+                                                        openEditRate(rate);
+                                                        setRateModalVisible(true);
+                                                    } else {
+                                                        setSelectedInventoryType(type);
+                                                        setInventoryModalVisible(true);
+                                                    }
+                                                }}
                                             >
-                                                <View style={styles.stockCardTop}>
-                                                    <Ionicons name="boat" size={20} color="#1e3a8a" />
-                                                    <Text style={styles.miniVesselName}>{trip.vesselId?.name}</Text>
+                                                <View style={styles.inventoryIconBox}>
+                                                    <Ionicons name="fish" size={24} color="#2563eb" />
                                                 </View>
-                                                <Text style={styles.miniStockWeight}>
-                                                    Total: {(trip.summary?.totalWeight || 0).toFixed(1)} kg
+                                                <Text style={styles.inventoryType}>{type.split(' ')[0]}</Text>
+                                                <Text style={styles.inventoryWeight}>
+                                                    {data.total.toFixed(1)} kg
                                                 </Text>
-                                                <View style={styles.manageLabel}>
-                                                    <Text style={styles.manageLabelText}>View Summary</Text>
-                                                    <Ionicons name="arrow-forward" size={14} color="#2563eb" />
+
+                                                {/* My Selling Price Display */}
+                                                {(() => {
+                                                    const rate = marketRates.find(r => r.fishType === type);
+                                                    return (
+                                                        <View style={styles.myPricePill}>
+                                                            <Text style={styles.myPriceLabel}>My Price:</Text>
+                                                            <Text style={styles.myPriceVal}>
+                                                                {rate ? `LKR ${Math.round(rate.retailPriceA || 0)}` : 'Set Price'}
+                                                            </Text>
+                                                        </View>
+                                                    );
+                                                })()}
+
+                                                <View style={styles.gradeBreakdown}>
+                                                    <Text style={styles.gradeText}>A: {data.gradeA.toFixed(0)}kg</Text>
+                                                    <Text style={styles.gradeText}>B: {data.gradeB.toFixed(0)}kg</Text>
+                                                </View>
+                                                <View style={styles.editPriceHint}>
+                                                    <Ionicons name="create-outline" size={12} color="#2563eb" />
+                                                    <Text style={styles.editPriceHintText}>Update Price</Text>
                                                 </View>
                                             </TouchableOpacity>
                                         ))}
@@ -391,20 +545,20 @@ const BuyerDashboardScreen = ({ navigation }) => {
                                 </View>
                             )}
 
-                            {ongoingTrips.length > 0 && (
+                            {filteredOngoingTrips.length > 0 && (
                                 <View style={styles.liveSection}>
                                     <View style={styles.liveHeader}>
                                         <View style={styles.liveDot} />
                                         <Text style={styles.sectionTitle}>Live at Sea (දැනට මුහුදේ)</Text>
                                     </View>
                                     <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.liveScroll}>
-                                        {ongoingTrips.map((trip) => (
+                                        {filteredOngoingTrips.map((trip) => (
                                             <View key={trip._id} style={styles.liveCard}>
                                                 <View style={styles.liveCardHeader}>
                                                     <Text style={styles.liveVesselName}>{trip.vesselId?.name}</Text>
                                                     <Text style={styles.liveHarbor}>{trip.plannerId?.district} Harbor</Text>
                                                 </View>
-                                                
+
                                                 <ScrollView horizontal style={styles.miniCatchPhotos}>
                                                     {trip.catches?.map((c, i) => (
                                                         c.photos?.[0] && <Image key={i} source={{ uri: c.photos[0] }} style={styles.miniPhoto} />
@@ -446,95 +600,196 @@ const BuyerDashboardScreen = ({ navigation }) => {
                 />
             )}
 
-            {/* Market Rate Management Modal */}
+            {/* ════ Market Price Management Modal ════ */}
             <RNModal visible={rateModalVisible} animationType="slide" transparent>
                 <View style={styles.modalOverlay}>
                     <View style={styles.modalContent}>
+
+                        {/* Header */}
                         <View style={styles.modalHeader}>
-                            <Text style={styles.modalTitle}>Market Price Management</Text>
-                            <TouchableOpacity onPress={() => setRateModalVisible(false)}>
+                            <View>
+                                <Text style={styles.modalTitle}>📊 Market Prices</Text>
+                                <Text style={styles.modalSubtitle}>Tap a card to edit prices</Text>
+                            </View>
+                            <TouchableOpacity onPress={() => { setRateModalVisible(false); setEditingRate(null); }}>
                                 <Ionicons name="close" size={28} color="#64748b" />
                             </TouchableOpacity>
                         </View>
 
-                        <ScrollView style={styles.ratesList}>
-                            {marketRates.map((rate) => (
-                                <View key={rate._id} style={styles.rateEditCard}>
-                                    <Text style={styles.rateFishType}>{rate.fishType}</Text>
-                                    <View style={styles.priceEditSection}>
-                                        <Text style={styles.priceGroupLabel}>Buying Prices (මාළු ගන්නා මිල)</Text>
-                                        <View style={styles.priceEditRow}>
-                                            <View style={styles.priceInputBox}>
-                                                <Text style={styles.priceInputLabel}>Grade A</Text>
-                                                <TextInput 
-                                                    style={styles.priceInput}
-                                                    keyboardType="numeric"
-                                                    defaultValue={rate.gradeAPrice.toString()}
-                                                    onEndEditing={(e) => handleUpdateRate(rate.fishType, 'gradeAPrice', e.nativeEvent.text)}
-                                                />
-                                            </View>
-                                            <View style={styles.priceInputBox}>
-                                                <Text style={styles.priceInputLabel}>Grade B</Text>
-                                                <TextInput 
-                                                    style={styles.priceInput}
-                                                    keyboardType="numeric"
-                                                    defaultValue={rate.gradeBPrice.toString()}
-                                                    onEndEditing={(e) => handleUpdateRate(rate.fishType, 'gradeBPrice', e.nativeEvent.text)}
-                                                />
-                                            </View>
-                                        </View>
-                                    </View>
+                        <ScrollView style={styles.ratesList} showsVerticalScrollIndicator={false}>
+                            {marketRates.map((rate) => {
+                                const isEditing = editingRate === rate.fishType;
+                                return (
+                                    <View key={rate._id} style={[styles.rateCard, isEditing && styles.rateCardActive]}>
 
-                                    <View style={[styles.priceEditSection, { marginTop: 15 }]}>
-                                        <Text style={[styles.priceGroupLabel, { color: '#16a34a' }]}>Retail Selling Prices (පාරිභෝගිකයාට විකුණන මිල)</Text>
-                                        <View style={styles.priceEditRow}>
-                                            <View style={styles.priceInputBox}>
-                                                <Text style={styles.priceInputLabel}>Grade A</Text>
-                                                <TextInput 
-                                                    style={[styles.priceInput, { color: '#16a34a', borderColor: '#bbf7d0' }]}
-                                                    keyboardType="numeric"
-                                                    defaultValue={rate.retailPriceA?.toString() || "1800"}
-                                                    onEndEditing={(e) => handleUpdateRate(rate.fishType, 'retailPriceA', e.nativeEvent.text)}
-                                                />
+                                        {/* ── Display row (always visible) ── */}
+                                        <TouchableOpacity
+                                            style={styles.rateCardHeader}
+                                            onPress={() => isEditing ? setEditingRate(null) : openEditRate(rate)}
+                                            activeOpacity={0.8}
+                                        >
+                                            <View style={styles.rateCardLeft}>
+                                                <Text style={styles.rateFishType}>🐟 {rate.fishType}</Text>
+                                                <View style={styles.ratePillRow}>
+                                                    <View style={[styles.ratePill, { backgroundColor: '#dcfce7' }]}>
+                                                        <Text style={[styles.ratePillText, { color: '#166534' }]}>A: LKR {Math.round(rate.gradeAPrice || 0).toLocaleString()}/kg</Text>
+                                                    </View>
+                                                    <View style={[styles.ratePill, { backgroundColor: '#fef9c3' }]}>
+                                                        <Text style={[styles.ratePillText, { color: '#854d0e' }]}>B: LKR {Math.round(rate.gradeBPrice || 0).toLocaleString()}/kg</Text>
+                                                    </View>
+                                                </View>
+                                                <View style={styles.ratePillRow}>
+                                                    <View style={[styles.ratePill, { backgroundColor: '#eff6ff' }]}>
+                                                        <Text style={[styles.ratePillText, { color: '#1e40af' }]}>Retail A: LKR {Math.round(rate.retailPriceA || 0).toLocaleString()}</Text>
+                                                    </View>
+                                                    <View style={[styles.ratePill, { backgroundColor: '#eff6ff' }]}>
+                                                        <Text style={[styles.ratePillText, { color: '#1e40af' }]}>Retail B: LKR {Math.round(rate.retailPriceB || 0).toLocaleString()}</Text>
+                                                    </View>
+                                                </View>
                                             </View>
-                                            <View style={styles.priceInputBox}>
-                                                <Text style={styles.priceInputLabel}>Grade B</Text>
-                                                <TextInput 
-                                                    style={[styles.priceInput, { color: '#16a34a', borderColor: '#bbf7d0' }]}
-                                                    keyboardType="numeric"
-                                                    defaultValue={rate.retailPriceB?.toString() || "1300"}
-                                                    onEndEditing={(e) => handleUpdateRate(rate.fishType, 'retailPriceB', e.nativeEvent.text)}
-                                                />
+                                            <Ionicons
+                                                name={isEditing ? 'chevron-up' : 'create-outline'}
+                                                size={20} color={isEditing ? '#2563eb' : '#94a3b8'}
+                                            />
+                                        </TouchableOpacity>
+
+                                        {/* ── Edit form (only when selected) ── */}
+                                        {isEditing && (
+                                            <View style={styles.editForm}>
+                                                <View style={styles.editDivider} />
+
+                                                <Text style={styles.editGroupLabel}>💳 My Buying Cost (මගේ මිලදී ගැනීමේ මිල - read only)</Text>
+                                                {(() => {
+                                                    const bp = buyingPrices.find(p => p.fishType === rate.fishType);
+                                                    return (
+                                                        <View style={styles.lockedCostCard}>
+                                                            <View style={styles.lockedCostHeader}>
+                                                                <Ionicons name="lock-closed" size={14} color="#64748b" />
+                                                                <Text style={styles.lockedCostLabel}>Fixed Planner Rate</Text>
+                                                            </View>
+                                                            <Text style={styles.lockedCostValue}>
+                                                                {bp
+                                                                    ? `LKR ${Math.round(bp.pricePerKg).toLocaleString()} / kg`
+                                                                    : 'No data yet'}
+                                                            </Text>
+                                                            {bp && (
+                                                                <Text style={styles.lockedCostSub}>
+                                                                    Last synced: {new Date(bp.lastUpdated).toLocaleDateString()}
+                                                                </Text>
+                                                            )}
+                                                            <Text style={styles.lockedNote}>* This cost is set by the Trip Planner and cannot be modified.</Text>
+                                                        </View>
+                                                    );
+                                                })()}
+
+
+                                                <Text style={[styles.editGroupLabel, { color: '#16a34a', marginTop: 12 }]}>🏪 My Retail Selling Prices (මගේ විකුණුම් මිල - 1kg)</Text>
+                                                <Text style={{ fontSize: 11, color: '#64748b', marginBottom: 10 }}>Set the price per 1kg you want to sell to your customers.</Text>
+                                                <View style={styles.editRow}>
+                                                    <View style={styles.editInputBox}>
+                                                        <Text style={styles.editInputLabel}>Grade A (LKR/kg)</Text>
+                                                        <TextInput
+                                                            style={[styles.editInput, { borderColor: '#bbf7d0' }]}
+                                                            keyboardType="numeric"
+                                                            value={draftPrices.retailPriceA}
+                                                            onChangeText={(v) => setDraftPrices(p => ({ ...p, retailPriceA: v }))}
+                                                            placeholder="e.g. 1800"
+                                                        />
+                                                    </View>
+                                                    <View style={styles.editInputBox}>
+                                                        <Text style={styles.editInputLabel}>Grade B (LKR/kg)</Text>
+                                                        <TextInput
+                                                            style={[styles.editInput, { borderColor: '#bbf7d0' }]}
+                                                            keyboardType="numeric"
+                                                            value={draftPrices.retailPriceB}
+                                                            onChangeText={(v) => setDraftPrices(p => ({ ...p, retailPriceB: v }))}
+                                                            placeholder="e.g. 1300"
+                                                        />
+                                                    </View>
+                                                </View>
+
+                                                <TouchableOpacity
+                                                    style={[styles.saveRateBtn, savingRate && { opacity: 0.6 }]}
+                                                    onPress={() => handleUpdateRate(rate.fishType)}
+                                                    disabled={savingRate}
+                                                >
+                                                    {savingRate
+                                                        ? <ActivityIndicator color="#fff" />
+                                                        : <><Ionicons name="save-outline" size={18} color="#fff" /><Text style={styles.saveRateBtnText}>Save Prices</Text></>
+                                                    }
+                                                </TouchableOpacity>
                                             </View>
-                                        </View>
+                                        )}
                                     </View>
-                                </View>
-                            ))}
+                                );
+                            })}
                         </ScrollView>
-                        
-                        <TouchableOpacity 
+
+                        <TouchableOpacity
                             style={styles.closeModalBtn}
-                            onPress={() => setRateModalVisible(false)}
+                            onPress={() => { setRateModalVisible(false); setEditingRate(null); }}
                         >
                             <Text style={styles.closeModalBtnText}>Done</Text>
                         </TouchableOpacity>
                     </View>
                 </View>
             </RNModal>
+
+            {/* ════ Inventory Detail Modal ════ */}
+            <RNModal visible={inventoryModalVisible} animationType="fade" transparent>
+                <View style={styles.modalOverlay}>
+                    <View style={styles.modalContent}>
+                        <View style={styles.modalHeader}>
+                            <View>
+                                <Text style={styles.modalTitle}>📦 {selectedInventoryType} Stock</Text>
+                                <Text style={styles.modalSubtitle}>History of purchases</Text>
+                            </View>
+                            <TouchableOpacity onPress={() => setInventoryModalVisible(false)}>
+                                <Ionicons name="close" size={28} color="#64748b" />
+                            </TouchableOpacity>
+                        </View>
+
+                        <ScrollView style={styles.ratesList}>
+                            {selectedInventoryType && inventory[selectedInventoryType]?.items.map((item) => (
+                                <TouchableOpacity
+                                    key={item._id}
+                                    style={styles.inventoryTripCard}
+                                    onPress={() => {
+                                        setInventoryModalVisible(false);
+                                        // Navigate to trip summary if tripId exists
+                                        if (item.tripId) {
+                                            navigation.navigate('TripSummary', { tripId: item.tripId });
+                                        }
+                                    }}
+                                >
+                                    <View style={styles.tripCardInfo}>
+                                        <Text style={styles.tripVesselName}>{item.vesselName}</Text>
+                                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                                            <Text style={styles.tripDate}>{item.date}</Text>
+                                            <View style={[styles.gradePill, { backgroundColor: item.grade === 'Grade A' ? '#eff6ff' : '#fef9c3' }]}>
+                                                <Text style={[styles.gradePillText, { color: item.grade === 'Grade A' ? '#1e40af' : '#854d0e' }]}>{item.grade}</Text>
+                                            </View>
+                                        </View>
+                                    </View>
+                                    <View style={styles.tripWeightBox}>
+                                        <Text style={styles.tripWeightVal}>{item.weight.toFixed(1)} kg</Text>
+                                        <Ionicons name="chevron-forward" size={16} color="#94a3b8" />
+                                    </View>
+                                </TouchableOpacity>
+                            ))}
+                        </ScrollView>
+
+                        <TouchableOpacity
+                            style={styles.closeModalBtn}
+                            onPress={() => setInventoryModalVisible(false)}
+                        >
+                            <Text style={styles.closeModalBtnText}>Close</Text>
+                        </TouchableOpacity>
+                    </View>
+                </View>
+            </RNModal>
         </View>
     );
-};
-
-const handleUpdateRate = async (fishType, field, value) => {
-    try {
-        await client.post('/api/market-rates', {
-            fishType,
-            [field]: parseFloat(value)
-        });
-        // Success
-    } catch (e) {
-        Alert.alert("Error", "Failed to update price");
-    }
 };
 
 const styles = StyleSheet.create({
@@ -866,61 +1121,157 @@ const styles = StyleSheet.create({
         alignItems: 'center',
         marginBottom: 20,
     },
-    modalTitle: {
-        fontSize: 20,
-        fontWeight: '800',
-        color: '#1e293b',
-    },
-    ratesList: {
-        marginBottom: 20,
-    },
-    rateEditCard: {
+    modalSubtitle: { fontSize: 13, color: '#64748b', fontWeight: '500', marginTop: 2 },
+
+    // ── Rate cards (display view) ────────────────────────
+    rateCard: {
         backgroundColor: '#f8fafc',
-        borderRadius: 16,
+        borderRadius: 18,
         padding: 16,
         marginBottom: 12,
         borderWidth: 1,
         borderColor: '#e2e8f0',
     },
-    rateFishType: {
-        fontSize: 16,
-        fontWeight: '700',
-        color: '#1e293b',
-        marginBottom: 12,
+    rateCardActive: {
+        borderColor: '#2563eb',
+        borderWidth: 2,
+        backgroundColor: '#eff6ff',
     },
-    priceEditSection: {
-        marginBottom: 5,
-    },
-    priceGroupLabel: {
-        fontSize: 10,
-        fontWeight: '800',
-        color: '#1e3a8a',
-        marginBottom: 8,
-        textTransform: 'uppercase',
-    },
-    priceEditRow: {
+    rateCardHeader: {
         flexDirection: 'row',
-        gap: 12,
+        justifyContent: 'space-between',
+        alignItems: 'flex-start',
     },
-    priceInputBox: {
-        flex: 1,
-    },
-    priceInputLabel: {
-        fontSize: 11,
-        color: '#64748b',
-        fontWeight: '700',
-        marginBottom: 4,
-    },
-    priceInput: {
+    rateCardLeft: { flex: 1, marginRight: 10 },
+    rateFishType: { fontSize: 16, fontWeight: '800', color: '#1e293b', marginBottom: 8 },
+    ratePillRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 5 },
+    ratePill: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 8 },
+    ratePillText: { fontSize: 12, fontWeight: '700' },
+
+    // ── Edit form (expanded view) ────────────────────────
+    editForm: { marginTop: 8 },
+    editDivider: { height: 1, backgroundColor: '#bfdbfe', marginVertical: 12 },
+    editGroupLabel: { fontSize: 11, fontWeight: '800', color: '#1e3a8a', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 },
+    editRow: { flexDirection: 'row', gap: 10 },
+    editInputBox: { flex: 1 },
+    editInputLabel: { fontSize: 11, color: '#64748b', fontWeight: '700', marginBottom: 4 },
+    editInput: {
         backgroundColor: '#fff',
-        borderWidth: 1,
+        borderWidth: 1.5,
         borderColor: '#cbd5e1',
         borderRadius: 10,
         padding: 10,
         fontSize: 15,
         fontWeight: '700',
+        color: '#1e293b',
+    },
+    saveRateBtn: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: 8,
+        backgroundColor: '#2563eb',
+        paddingVertical: 13,
+        borderRadius: 14,
+        marginTop: 14,
+    },
+    saveRateBtnText: { color: '#fff', fontWeight: '800', fontSize: 15 },
+
+    // ── Inventory Styles ──────────────────────────────
+    inventoryCard: {
+        backgroundColor: '#fff',
+        borderRadius: 20,
+        padding: 16,
+        marginRight: 12,
+        width: 140,
+        alignItems: 'center',
+        borderWidth: 1,
+        borderColor: '#e2e8f0',
+        elevation: 2,
+    },
+    inventoryIconBox: {
+        width: 48,
+        height: 48,
+        borderRadius: 14,
+        backgroundColor: '#eff6ff',
+        justifyContent: 'center',
+        alignItems: 'center',
+        marginBottom: 10,
+    },
+    inventoryType: {
+        fontSize: 14,
+        fontWeight: '800',
+        color: '#1e293b',
+        marginBottom: 2,
+    },
+    inventoryWeight: {
+        fontSize: 16,
+        fontWeight: '900',
+        color: '#2563eb',
+        marginBottom: 8,
+    },
+    gradeBreakdown: {
+        flexDirection: 'row',
+        gap: 8,
+        borderTopWidth: 1,
+        borderTopColor: '#f1f5f9',
+        paddingTop: 8,
+        width: '100%',
+        justifyContent: 'center',
+    },
+    gradeText: {
+        fontSize: 10,
+        fontWeight: '700',
+        color: '#64748b',
+    },
+    myPricePill: {
+        backgroundColor: '#f0fdf4',
+        paddingHorizontal: 8,
+        paddingVertical: 4,
+        borderRadius: 8,
+        marginVertical: 6,
+        alignItems: 'center',
+        borderWidth: 1,
+        borderColor: '#bbf7d0',
+    },
+    myPriceLabel: {
+        fontSize: 9,
+        color: '#166534',
+        fontWeight: '700',
+        textTransform: 'uppercase',
+    },
+    myPriceVal: {
+        fontSize: 12,
+        fontWeight: '900',
+        color: '#166534',
+    },
+    editPriceHint: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 4,
+        marginTop: 8,
+    },
+    editPriceHintText: {
+        fontSize: 10,
+        fontWeight: '700',
         color: '#2563eb',
     },
+    inventoryTripCard: {
+        flexDirection: 'row',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        backgroundColor: '#f8fafc',
+        padding: 14,
+        borderRadius: 14,
+        marginBottom: 10,
+        borderWidth: 1,
+        borderColor: '#e2e8f0',
+    },
+    tripCardInfo: { flex: 1 },
+    tripVesselName: { fontSize: 15, fontWeight: '700', color: '#1e293b' },
+    tripDate: { fontSize: 12, color: '#64748b', marginTop: 2 },
+    tripWeightBox: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+    tripWeightVal: { fontSize: 14, fontWeight: '800', color: '#2563eb' },
     closeModalBtn: {
         backgroundColor: '#1e3a8a',
         paddingVertical: 16,
@@ -1027,6 +1378,103 @@ const styles = StyleSheet.create({
         fontSize: 16,
         fontWeight: '900',
         color: '#22c55e',
+    },
+    // ── Price breakdown styles ──────────────────────────────
+    priceBreakdownBox: {
+        marginTop: 14,
+        backgroundColor: '#f0fdf4',
+        borderRadius: 16,
+        padding: 14,
+        borderWidth: 1,
+        borderColor: '#bbf7d0',
+    },
+    priceBreakdownTitle: {
+        fontSize: 12,
+        fontWeight: '800',
+        color: '#166534',
+        marginBottom: 10,
+        textTransform: 'uppercase',
+        letterSpacing: 0.5,
+    },
+    priceBreakdownRow: {
+        flexDirection: 'row',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        paddingVertical: 8,
+        borderBottomWidth: 1,
+        borderBottomColor: '#dcfce7',
+    },
+    priceBreakdownFish: {
+        fontSize: 13,
+        fontWeight: '800',
+        color: '#1e293b',
+    },
+    priceBreakdownSub: {
+        fontSize: 11,
+        color: '#64748b',
+        fontWeight: '500',
+        marginTop: 2,
+    },
+    priceBreakdownVal: {
+        fontSize: 14,
+        fontWeight: '900',
+        color: '#166534',
+    },
+    // ── Read-only display box ──────────────────────────────
+    readOnlyText: {
+        fontSize: 15,
+        fontWeight: '700',
+        color: '#64748b',
+    },
+    // ── Locked Cost Card Styles ──────────────────────────
+    lockedCostCard: {
+        backgroundColor: '#f8fafc',
+        borderRadius: 16,
+        padding: 16,
+        borderWidth: 1,
+        borderColor: '#e2e8f0',
+        marginBottom: 10,
+    },
+    lockedCostHeader: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 6,
+        marginBottom: 4,
+    },
+    lockedCostLabel: {
+        fontSize: 11,
+        fontWeight: '700',
+        color: '#64748b',
+        textTransform: 'uppercase',
+    },
+    lockedCostValue: {
+        fontSize: 18,
+        fontWeight: '900',
+        color: '#475569',
+        marginVertical: 4,
+    },
+    lockedCostSub: {
+        fontSize: 10,
+        color: '#94a3b8',
+        fontWeight: '600',
+    },
+    lockedNote: {
+        fontSize: 10,
+        color: '#94a3b8',
+        fontStyle: 'italic',
+        marginTop: 10,
+        borderTopWidth: 1,
+        borderTopColor: '#f1f5f9',
+        paddingTop: 8,
+    },
+    gradePill: {
+        paddingHorizontal: 8,
+        paddingVertical: 2,
+        borderRadius: 6,
+    },
+    gradePillText: {
+        fontSize: 10,
+        fontWeight: '800',
     },
 });
 

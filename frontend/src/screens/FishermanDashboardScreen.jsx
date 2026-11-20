@@ -1,11 +1,11 @@
 import React, { useState, useEffect } from 'react';
-import { 
-    View, 
-    Text, 
-    StyleSheet, 
-    FlatList, 
-    TouchableOpacity, 
-    Image, 
+import {
+    View,
+    Text,
+    StyleSheet,
+    FlatList,
+    TouchableOpacity,
+    Image,
     ActivityIndicator,
     Alert,
     Dimensions
@@ -22,6 +22,7 @@ const FishermanDashboardScreen = ({ navigation }) => {
     const [loading, setLoading] = useState(true);
     const [availableTrips, setAvailableTrips] = useState([]);
     const [activeTrip, setActiveTrip] = useState(null);
+    const [completedTrips, setCompletedTrips] = useState([]);
     const [user, setUser] = useState(null);
 
     useEffect(() => {
@@ -30,12 +31,10 @@ const FishermanDashboardScreen = ({ navigation }) => {
 
     const loadUserAndTrips = async () => {
         try {
-            const userData = await AsyncStorage.getItem('userData');
-            if (userData) {
-                const parsedUser = JSON.parse(userData);
-                setUser(parsedUser);
-                fetchData(parsedUser.district);
-            }
+            // Fetch fresh profile for rating
+            const profileRes = await client.get('/api/users/profile');
+            setUser(profileRes.data);
+            fetchData(profileRes.data.district);
         } catch (error) {
             console.error(error);
             setLoading(false);
@@ -48,14 +47,19 @@ const FishermanDashboardScreen = ({ navigation }) => {
             const response = await client.get(`/api/trips/available/${district}`);
             setAvailableTrips(response.data);
 
-            // Fetch my active trips (where I am crew)
+            // Fetch my trips (active and completed)
             const myTripsResponse = await client.get('/api/trips/my-trips');
-            const active = myTripsResponse.data.find(t => t.status === 'planned' || t.status === 'ongoing');
+            const allMyTrips = myTripsResponse.data || [];
             
+            const active = allMyTrips.find(t => t.status === 'planned' || t.status === 'ongoing');
+            const completed = allMyTrips.filter(t => t.status === 'completed' || t.status === 'sold');
+            setCompletedTrips(completed);
+
             if (active) {
-                // Fetch full details of the active trip to get crew names
                 const detailsResponse = await client.get(`/api/trips/${active._id}`);
                 setActiveTrip(detailsResponse.data);
+            } else {
+                setActiveTrip(null);
             }
 
             setLoading(false);
@@ -83,9 +87,9 @@ const FishermanDashboardScreen = ({ navigation }) => {
 
     const renderTripCard = ({ item }) => (
         <View style={styles.tripCard}>
-            <Image 
-                source={item.vesselId.image ? { uri: item.vesselId.image } : require('../../assets/adaptive-icon.png')} 
-                style={styles.vesselImage} 
+            <Image
+                source={item.vesselId.image ? { uri: item.vesselId.image } : require('../../assets/adaptive-icon.png')}
+                style={styles.vesselImage}
             />
             <View style={styles.cardOverlay}>
                 <LinearGradient
@@ -100,7 +104,7 @@ const FishermanDashboardScreen = ({ navigation }) => {
                     </View>
                 </LinearGradient>
             </View>
-            
+
             <View style={styles.cardBody}>
                 <View style={styles.infoRow}>
                     <Ionicons name="calendar-outline" size={18} color="#2563eb" />
@@ -127,7 +131,7 @@ const FishermanDashboardScreen = ({ navigation }) => {
                     <Text style={styles.crewSub}>Current requests: {item.requests.length}</Text>
                 </View>
 
-                <TouchableOpacity 
+                <TouchableOpacity
                     style={[styles.joinButton, activeTrip && styles.disabledJoinButton]}
                     onPress={() => !activeTrip && handleJoinRequest(item._id)}
                     disabled={!!activeTrip}
@@ -149,13 +153,19 @@ const FishermanDashboardScreen = ({ navigation }) => {
             <LinearGradient colors={['#0f172a', '#1e3a8a']} style={styles.header}>
                 <SafeAreaView>
                     <View style={styles.headerContent}>
-                        <View>
-                            <Text style={styles.welcomeText}>Available Trips</Text>
-                            <Text style={styles.subText}>Find a trip to join (Nearest First)</Text>
+                        <View style={{ flex: 1 }}>
+                            <Text style={styles.welcomeText}>Hello, {user?.name?.split(' ')[0]}</Text>
+                            <View style={styles.ratingRow}>
+                                <Ionicons name="star" size={14} color="#fbbf24" />
+                                <Text style={styles.ratingText}>
+                                    {user?.rating ? user.rating.toFixed(1) : 'N/A'} ({user?.totalRatings || 0} reviews)
+                                </Text>
+                            </View>
+                            <Text style={styles.subText}>Find a trip to join in {user?.district}</Text>
                         </View>
 
                         <TouchableOpacity style={styles.profileBtn} onPress={() => navigation.navigate('Profile')}>
-                            <Ionicons name="person-circle-outline" size={32} color="#fff" />
+                            <Ionicons name="person-circle-outline" size={40} color="#fff" />
                         </TouchableOpacity>
                     </View>
                 </SafeAreaView>
@@ -173,14 +183,14 @@ const FishermanDashboardScreen = ({ navigation }) => {
                             <View style={styles.activeTripContainer}>
                                 <Text style={styles.sectionTitle}>My Current Trip</Text>
                                 <View style={styles.activeTripCard}>
-                                    <Image 
-                                        source={activeTrip.vesselId.image ? { uri: activeTrip.vesselId.image } : require('../../assets/adaptive-icon.png')} 
-                                        style={styles.activeVesselImage} 
+                                    <Image
+                                        source={activeTrip.vesselId.image ? { uri: activeTrip.vesselId.image } : require('../../assets/adaptive-icon.png')}
+                                        style={styles.activeVesselImage}
                                     />
                                     <View style={styles.activeCardContent}>
                                         <Text style={styles.activeVesselName}>{activeTrip.vesselId.name}</Text>
                                         <Text style={styles.activeTripStatus}>Status: {activeTrip.status.toUpperCase()}</Text>
-                                        
+
                                         <View style={styles.crewSection}>
                                             <Text style={styles.crewHeader}>My Crew Members:</Text>
                                             <View style={styles.crewList}>
@@ -195,6 +205,35 @@ const FishermanDashboardScreen = ({ navigation }) => {
                                     </View>
                                 </View>
                                 <Text style={[styles.sectionTitle, { marginTop: 20 }]}>Available Trips to Join</Text>
+                            </View>
+                        )
+                    }
+                    ListFooterComponent={
+                        completedTrips.length > 0 && (
+                            <View style={styles.completedSection}>
+                                <Text style={styles.sectionTitle}>Completed Trips & Payouts</Text>
+                                {completedTrips.map((trip) => (
+                                    <TouchableOpacity 
+                                        key={trip._id} 
+                                        style={styles.completedCard}
+                                        onPress={() => navigation.navigate('TripSummary', { tripId: trip._id })}
+                                    >
+                                        <View style={styles.completedIcon}>
+                                            <Ionicons name="checkmark-circle" size={24} color="#16a34a" />
+                                        </View>
+                                        <View style={{ flex: 1 }}>
+                                            <Text style={styles.completedVessel}>{trip.vesselId?.name}</Text>
+                                            <Text style={styles.completedDate}>{new Date(trip.departureTime).toLocaleDateString()}</Text>
+                                        </View>
+                                        <View style={styles.payoutInfo}>
+                                            <Text style={styles.payoutLabel}>Status</Text>
+                                            <Text style={[styles.payoutValue, { color: trip.status === 'sold' ? '#16a34a' : '#2563eb' }]}>
+                                                {trip.status === 'sold' ? 'PAYOUT READY' : 'COMPLETED'}
+                                            </Text>
+                                        </View>
+                                        <Ionicons name="chevron-forward" size={20} color="#cbd5e1" />
+                                    </TouchableOpacity>
+                                ))}
                             </View>
                         )
                     }
@@ -241,6 +280,17 @@ const styles = StyleSheet.create({
         fontSize: 14,
         color: 'rgba(255, 255, 255, 0.7)',
         marginTop: 4,
+    },
+    ratingRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 6,
+        marginTop: 4,
+    },
+    ratingText: {
+        color: '#fbbf24',
+        fontSize: 14,
+        fontWeight: '700',
     },
     profileBtn: {
         justifyContent: 'center',
@@ -424,6 +474,55 @@ const styles = StyleSheet.create({
         fontWeight: '600',
         color: '#2563eb',
     },
+    sectionTitle: {
+        fontSize: 18,
+        fontWeight: '800',
+        color: '#1e293b',
+        marginBottom: 12,
+    },
+    completedSection: {
+        marginTop: 40,
+        paddingBottom: 40,
+    },
+    completedCard: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        backgroundColor: '#fff',
+        padding: 16,
+        borderRadius: 20,
+        marginBottom: 12,
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 2 },
+        shadowOpacity: 0.03,
+        shadowRadius: 8,
+        elevation: 2,
+    },
+    completedIcon: {
+        marginRight: 15,
+    },
+    completedVessel: {
+        fontSize: 16,
+        fontWeight: '700',
+        color: '#1e293b',
+    },
+    completedDate: {
+        fontSize: 12,
+        color: '#64748b',
+    },
+    payoutInfo: {
+        alignItems: 'flex-end',
+        marginRight: 10,
+    },
+    payoutLabel: {
+        fontSize: 10,
+        color: '#94a3b8',
+        fontWeight: '700',
+        textTransform: 'uppercase',
+    },
+    payoutValue: {
+        fontSize: 12,
+        fontWeight: '800',
+    }
 });
 
 

@@ -22,6 +22,8 @@ import OrderManagementScreen from './src/screens/OrderManagementScreen';
 import EarningsScreen from './src/screens/EarningsScreen';
 import NotificationScreen from './src/screens/NotificationScreen';
 import CartScreen from './src/screens/CartScreen';
+import WelcomeScreen from './src/screens/WelcomeScreen';
+import TripHistoryScreen from './src/screens/TripHistoryScreen';
 
 
 
@@ -32,11 +34,12 @@ export default function App() {
     <SafeAreaProvider>
       <NavigationContainer>
         <Stack.Navigator 
-          initialRouteName="Login"
+          initialRouteName="Welcome"
           screenOptions={{
             headerShown: false
           }}
         >
+          <Stack.Screen name="Welcome" component={WelcomeScreen} />
           <Stack.Screen name="Login" component={LoginScreen} />
           <Stack.Screen name="Home" component={HomeScreen} />
           <Stack.Screen name="Register" component={RegisterScreen} />
@@ -55,6 +58,7 @@ export default function App() {
           <Stack.Screen name="Earnings" component={EarningsScreen} />
           <Stack.Screen name="Notifications" component={NotificationScreen} />
           <Stack.Screen name="Cart" component={CartScreen} />
+          <Stack.Screen name="TripHistory" component={TripHistoryScreen} />
         </Stack.Navigator>
 
 
